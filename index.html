@@ -2312,46 +2312,85 @@ function isForToday(g) {
   return false;
 }
 
-function renderTodayPage() {
-  const today = todayKey();
-  const todayDate = new Date(new Date().toDateString());
+// Horizon definitions: id, label, and how many days ahead the window extends (inclusive of today)
+const TASK_HORIZONS = [
+  { id: 'today',    label: 'Today',     days: 0 },
+  { id: 'tomorrow', label: 'Tomorrow',  days: 1, exact: true }, // exact: only that single day, not a range
+  { id: 'week',     label: 'This Week', days: 7 },
+  { id: 'month',    label: 'This Month', days: 30 },
+  { id: '3months',  label: '3 Months',  days: 90 },
+  { id: '6months',  label: '6 Months',  days: 182 },
+];
+let taskHorizon = 'today';
 
-  // Build grouped structure: { catId -> { cat, goals: [ { goal, actions[] } ] } }
+function setTaskHorizon(id) {
+  taskHorizon = id;
+  renderMain();
+}
+
+function renderTodayPage() {
+  const horizon = TASK_HORIZONS.find(h => h.id === taskHorizon) || TASK_HORIZONS[0];
+  const todayD = new Date(new Date().toDateString());
+  const todayKeyStr = todayKey();
+
+  let rangeStart, rangeEnd;
+  if (horizon.exact) {
+    const d = new Date(todayD); d.setDate(d.getDate() + horizon.days);
+    rangeStart = rangeEnd = dateKey(d);
+  } else {
+    rangeStart = todayKeyStr;
+    const endD = new Date(todayD); endD.setDate(endD.getDate() + horizon.days);
+    rangeEnd = dateKey(endD);
+  }
+
+  // Horizon selector row
+  let html = `<div class="cat-pills-row" style="display:flex;margin:0 -14px 14px;padding:0 14px 10px;border-bottom:1px solid var(--border)">
+    ${TASK_HORIZONS.map(h => `<div class="cat-pill ${taskHorizon===h.id?'active':''}" onclick="setTaskHorizon('${h.id}')">${h.label}</div>`).join('')}
+  </div>`;
+
+  // Build grouped structure: { catId -> { cat, goals: [ { goal, actions[], showGoal, dateLabel } ] } }
   const grouped = {};
+  let totalCount = 0;
+
+  function inRange(dateStr) {
+    return dateStr >= rangeStart && dateStr <= rangeEnd;
+  }
 
   state.goals.forEach(g => {
     if (g.done) return;
-    const forToday = isForToday(g);
-    const hasActionsForToday = (g.actions||[]).some(a => {
-      if (a.recurring && a.occurrences) return a.occurrences.some(o => o.date === today && !o.done);
-      return !a.done && a.deadline === today;
+    const goalInRange = (taskHorizon === 'today' && isForToday(g)) || (g.deadline && inRange(g.deadline));
+
+    const matchingActions = (g.actions||[]).filter(a => {
+      if (a.recurring && a.occurrences) return a.occurrences.some(o => inRange(o.date) && !o.done);
+      return !a.done && a.deadline && inRange(a.deadline);
     });
 
-    if (!forToday && !hasActionsForToday) return;
+    if (!goalInRange && !matchingActions.length) return;
 
     const cat = state.categories.find(c => c.id === g.category);
     if (!grouped[g.category]) grouped[g.category] = { cat, goals: [] };
 
-    // Collect which actions are for today
-    const todayActions = (g.actions||[]).filter(a => {
-      if (a.recurring && a.occurrences) return a.occurrences.some(o => o.date === today);
-      if (!a.done && a.deadline === today) return true;
-      return false;
-    });
-
-    grouped[g.category].goals.push({ goal: g, actions: todayActions, showGoal: forToday && !todayActions.length });
+    grouped[g.category].goals.push({ goal: g, actions: matchingActions, showGoal: goalInRange && !matchingActions.length });
+    totalCount++;
   });
 
   const allEmpty = Object.keys(grouped).length === 0;
-  const doneCount = state.dailyLog[today] || 0;
+  const doneCount = state.dailyLog[todayKeyStr] || 0;
 
-  let html = `<div class="dash-summary-row" style="grid-template-columns:1fr 1fr;margin-bottom:14px">
-    <div class="dash-stat-card"><div class="dash-stat-val">${doneCount}</div><div class="dash-stat-label">Actions done today</div></div>
-    <div class="dash-stat-card"><div class="dash-stat-val">${new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</div><div class="dash-stat-label">${new Date().toLocaleDateString('en-GB',{weekday:'long'})}</div></div>
+  const summaryLabel = horizon.exact
+    ? new Date(rangeStart).toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'short'})
+    : `${new Date(rangeStart).toLocaleDateString('en-GB',{day:'numeric',month:'short'})} – ${new Date(rangeEnd).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}`;
+
+  html += `<div class="dash-summary-row" style="grid-template-columns:1fr 1fr;margin-bottom:14px">
+    <div class="dash-stat-card"><div class="dash-stat-val">${totalCount}</div><div class="dash-stat-label">${horizon.label} — items</div></div>
+    <div class="dash-stat-card"><div class="dash-stat-val" style="font-size:15px">${summaryLabel}</div><div class="dash-stat-label">${taskHorizon==='today'?`${doneCount} done today`:'Date range'}</div></div>
   </div>`;
 
   if (allEmpty) {
-    html += `<div class="empty-state"><div class="icon">☀️</div><p>Nothing scheduled for today. To add a goal to today's list, tap <b>+</b> and check "Add to today's tasks", or set a deadline of today on any goal or action.</p></div>`;
+    const msg = taskHorizon === 'today'
+      ? 'Nothing scheduled for today. Tap <b>+</b> and check "Add to today\'s tasks", or set a deadline of today on any goal or action.'
+      : `Nothing with a deadline in this window yet. Set deadlines on goals or actions to see them show up under ${horizon.label}.`;
+    html += `<div class="empty-state"><div class="icon">☀️</div><p>${msg}</p></div>`;
   } else {
     Object.values(grouped).forEach(({ cat, goals }) => {
       html += `<div class="category-section">`;
@@ -2361,10 +2400,10 @@ function renderTodayPage() {
         html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px;box-shadow:var(--shadow)">`;
         html += `<div style="font-size:13.5px;font-weight:500;color:var(--ink);margin-bottom:${actions.length?'8px':'0'}">${escapeHtml(goal.title)}`;
         if (goal.time) html += `<span class="goal-deadline" style="margin-left:6px">⏰ ${goal.time}</span>`;
+        if (goal.deadline && taskHorizon !== 'today') html += `<span class="goal-deadline" style="margin-left:6px">📅 ${new Date(goal.deadline).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</span>`;
         html += `</div>`;
 
         if (showGoal && !actions.length) {
-          // No specific actions — show goal-level check
           html += `<div class="quick-task-row" style="padding:0;border:none;background:none;margin:0">
             <div class="goal-check ${goal.done?'checked':''}" style="width:22px;height:22px" onclick="toggleGoal(${goal.id})"></div>
             <div class="quick-task-text ${goal.done?'done':''}">Mark complete</div>
@@ -2373,17 +2412,19 @@ function renderTodayPage() {
 
         actions.forEach(a => {
           if (a.recurring && a.occurrences) {
-            const occ = a.occurrences.find(o => o.date === today);
-            if (occ) {
+            const occsInRange = a.occurrences.filter(o => inRange(o.date));
+            occsInRange.forEach(occ => {
+              const dateLabel = taskHorizon !== 'today' ? `<span style="color:var(--ink3);font-size:11px;margin-left:4px">${new Date(occ.date).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</span>` : '';
               html += `<div class="quick-task-row" style="padding:4px 0;border:none;background:none;margin:0">
-                <div class="goal-check ${occ.done?'checked':''}" style="width:22px;height:22px" onclick="toggleOccurrence(${goal.id},${a.id},'${today}')"></div>
-                <div class="quick-task-text ${occ.done?'done':''}">${escapeHtml(a.text)} <span style="color:var(--ink3);font-size:11px">+${a.points||0}pts</span></div>
+                <div class="goal-check ${occ.done?'checked':''}" style="width:22px;height:22px" onclick="toggleOccurrence(${goal.id},${a.id},'${occ.date}')"></div>
+                <div class="quick-task-text ${occ.done?'done':''}">${escapeHtml(a.text)} <span style="color:var(--ink3);font-size:11px">+${a.points||0}pts</span>${dateLabel}</div>
               </div>`;
-            }
+            });
           } else {
+            const dateLabel = taskHorizon !== 'today' && a.deadline ? `<span style="color:var(--ink3);font-size:11px;margin-left:4px">${new Date(a.deadline).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</span>` : '';
             html += `<div class="quick-task-row" style="padding:4px 0;border:none;background:none;margin:0">
               <div class="goal-check ${a.done?'checked':''}" style="width:22px;height:22px" onclick="toggleAction(${goal.id},${a.id})"></div>
-              <div class="quick-task-text ${a.done?'done':''}">${escapeHtml(a.text)} <span style="color:var(--ink3);font-size:11px">+${a.points||0}pts</span></div>
+              <div class="quick-task-text ${a.done?'done':''}">${escapeHtml(a.text)} <span style="color:var(--ink3);font-size:11px">+${a.points||0}pts</span>${dateLabel}</div>
             </div>`;
           }
         });
